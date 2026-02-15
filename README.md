@@ -125,6 +125,10 @@ bash scripts/train_ppo.sh
 bash scripts/train_grpo.sh
 ```
 
+## Datasets
+
+All the datasets can be found at [here](https://huggingface.co/datasets/RUC-NLPIR/FlashRAG_datasets).
+
 
 ## Acknowledge
 
