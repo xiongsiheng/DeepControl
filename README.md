@@ -5,7 +5,7 @@ This repository contains the code for the paper [Scaling Search-Augmented LLM Re
 ## Overview
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/Framework.png" width="550">
+  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/Framework.png" width="450">
 </p>
 
 We introduce a principled framework for adaptive information control based on a formal notion of information utility, which measures the marginal value of retrieved evidence under a given reasoning state.
@@ -13,7 +13,7 @@ We introduce a principled framework for adaptive information control based on a 
 Built on this formulation, we design:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/search_definition.png" width="750">
+  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/search_definition.png" width="650">
 </p>
 
 * **Retrieval continuation control**
