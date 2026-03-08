@@ -1,0 +1,15 @@
+python infer_vanilla_fast.py \
+  --mode dataset \
+  --source local \
+  --base_url http://127.0.0.1:8001/v1 \
+  --model PeterJinGo/SearchR1-nq_hotpotqa_train-qwen2.5-3b-it-em-grpo \
+  --dataset_repo_path FlashRAG_datasets \
+  --config_name hotpotqa \
+  --split dev \
+  --topk 3 \
+  --retriever_url http://127.0.0.1:8000 \
+  --max_turns 6 \
+  --max_tokens 2048 \
+  --temperature 0 \
+  --num_workers 8 \
+  --out_jsonl results/infer_vanilla_SearchR1-nq_hotpotqa_train-qwen2.5-3b-it-em-grpo_hotpotqa_topk3_max_turns_6_temperature_0.jsonl

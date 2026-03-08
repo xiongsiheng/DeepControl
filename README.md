@@ -1,33 +1,42 @@
 # DeepControl: Scaling Search-Augmented LLM Reasoning via Adaptive Information Control
 
-This repository contains the code for the paper [Scaling Search-Augmented LLM Reasoning via Adaptive Information Control](https://www.arxiv.org/pdf/2602.01672).
+This repository contains the official implementation of the paper: [Scaling Search-Augmented LLM Reasoning via Adaptive Information Control](https://openreview.net/pdf?id=nGEWOtne5c).
+
+Search-augmented LLM agents have become a powerful paradigm for solving knowledge-intensive tasks.
+However, naive retrieval often introduces redundant evidence, long contexts, and unstable reasoning behaviors.
+
+DeepControl introduces a principled framework that enables LLM agents to actively regulate information acquisition during reasoning.
 
 ## Overview
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/Framework.png" width="450">
-</p>
-
-We introduce a principled framework for adaptive information control based on a formal notion of information utility, which measures the marginal value of retrieved evidence under a given reasoning state.
-
-Built on this formulation, we design:
+DeepControl is built upon a formal notion of information utility, which measures the marginal value of retrieved evidence under the current reasoning state.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/search_definition.png" width="650">
+  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/utility_curves.png" width="750">
 </p>
+
+Based on this formulation, the framework introduces three key mechanisms:
 
 * **Retrieval continuation control**
   → Decide *when to continue or stop retrieving*
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/Granularity_control.png" width="750">
+  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/search_definition.png" width="650">
 </p>
 
 * **Granularity control**
   → Decide *how much information to expand*
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/Granularity_control.png" width="750">
+</p>
+
 * **Annealed control training**
   → Enables the agent to internalize efficient information acquisition behavior
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/Framework.png" width="450">
+</p>
 
 Together, these mechanisms transform retrieval from a passive tool into an actively regulated decision process.
 
@@ -68,7 +77,7 @@ pip install flash-attn --no-build-isolation
 pip install wandb
 ```
 
-### Retriever environment (optional)
+### Retriever environment (Optional)
 
 If you want to run a local retriever server, we recommend a separate environment.
 
@@ -89,7 +98,8 @@ pip install uvicorn fastapi
 
 ## Quick Start
 
-Train a reasoning + search LLM with e5 as the retriever and Wikipedia as corpus.
+### Training
+Train a search-augmented reasoning agent with e5 as the retriever and Wikipedia as corpus.
 
 1. Download the index and corpus.
 
@@ -112,9 +122,8 @@ python scripts/data_process/nq_hotpotqa_search.py
 
 ```bash
 conda activate retriever
+# Recommended: CPU-based retriever for RL training
 bash scripts/entryretrieval_launch_CPU.sh
-# For inference you can use GPU retriever:
-# bash scripts/entryretrieval_launch.sh
 ```
 
 4. Run RL training.
@@ -125,6 +134,66 @@ bash scripts/train_ppo.sh
 bash scripts/train_grpo.sh
 ```
 
+### Inference
+DeepControl supports two inference modes.
+
+#### Baseline
+1. Launch local retrieval server:
+The retriever returns raw passages and supports a single action, i.e., retrieve.
+```bash
+conda activate retriever
+bash scripts/retrieval_launch_CPU.sh
+
+# Optional: GPU-based retriever
+# bash scripts/retrieval_launch.sh
+```
+
+2. Run agentic inference:
+Requires APIs that support single-turn prefill (e.g. vLLM).
+```bash
+conda activate deepcontrol
+bash scripts/run_local_vllm_service_baseline.sh
+bash scripts/infer_vanilla_fast.sh
+```
+
+
+#### DeepControl (Hierarchical Retrieval)
+1. Launch local retrieval server:
+The retriever returns hierarchical retrieval results and supports two actions, i.e., retrieve and expand.
+```bash
+conda activate retriever
+bash scripts/entryretrieval_launch_CPU.sh
+
+# Optional: GPU-based retriever
+# bash scripts/entryretrieval_launch.sh
+```
+
+2. Run agentic inference
+Retrieved information will be added as user messages, which allows compatibility with most APIs, including proprietary models.
+```bash
+conda activate deepcontrol
+
+# Optional: local inference
+bash scripts/run_local_vllm_service.sh
+
+bash scripts/infer_fast.sh
+```
+
+#### API Keys
+If you want to run the system with external inference APIs (e.g., OpenAI, TogetherAI, DeepSeek, Aliyun), you need to configure the corresponding API keys.
+```bash
+cp env.sample .env
+```
+Edit .env with your API keys
+```bash
+# LLM keys
+OPENAI_API_KEY=
+TOGETHER_API_KEY=
+DEEPSEEK_API_KEY=
+ALIYUN_API_KEY=
+```
+
+
 ## Datasets
 
 All the datasets can be found at [here](https://huggingface.co/datasets/RUC-NLPIR/FlashRAG_datasets).
@@ -134,6 +203,7 @@ All the datasets can be found at [here](https://huggingface.co/datasets/RUC-NLPI
 
 The implementation is built upon [veRL](https://github.com/volcengine/verl) and [Search-R1](https://github.com/PeterGriffinJin/Search-R1).
 We sincerely appreciate these teams for their open-source contributions.
+
 
 ## Citation
 

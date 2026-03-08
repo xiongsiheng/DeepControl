@@ -194,12 +194,12 @@ utility_gamma: 0.5
 
 utility_low_threshold: 0.20
 utility_low_patience: 2
-utility_min_turns_before_stop: 2
+utility_min_turns_before_stop: 1
 utility_force_stop_after_turn: null
 utility_continue_threshold: 0.3
 utility_continue_patience: 2
 utility_continue_score_max: -2.0
-utility_continue_prob: 0.10
+utility_continue_prob: 1.0
 
 utility_intervention_schedule: [0.9, 0.9, 0.5, 0.2, 0.0]
 utility_random_seed: 42

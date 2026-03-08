@@ -1,0 +1,15 @@
+python infer_fast.py \
+  --mode dataset \
+  --source local \
+  --base_url http://127.0.0.1:8001/v1 \
+  --model deepcontrol-qwen25-3b \
+  --dataset_repo_path FlashRAG_datasets \
+  --config_name hotpotqa \
+  --split dev \
+  --topk 5 \
+  --retriever_url http://127.0.0.1:8000 \
+  --max_turns 8 \
+  --max_tokens 2048 \
+  --temperature 0 \
+  --num_workers 8 \
+  --out_jsonl results/infer_deepcontrol-qwen25-3b_hotpotqa_topk5_max_turns_8_temperature_0.jsonl
