@@ -168,7 +168,7 @@ bash scripts/entryretrieval_launch_CPU.sh
 # bash scripts/entryretrieval_launch.sh
 ```
 
-2. Run agentic inference
+2. Run agentic inference:
 Retrieved information will be added as user messages, which allows compatibility with most APIs, including proprietary models.
 ```bash
 conda activate deepcontrol
