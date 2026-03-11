@@ -1,6 +1,6 @@
-# DeepControl: Scaling Search-Augmented LLM Reasoning via Adaptive Information Control
+# DeepControl: Adaptive Information Control for Search-Augmented LLM Reasoning
 
-This repository contains the official implementation of the paper: [Scaling Search-Augmented LLM Reasoning via Adaptive Information Control](https://openreview.net/pdf?id=nGEWOtne5c).
+This repository contains the official implementation of the **[EMNLP 26, ICLR 26 Scaling Post-training for LLMs Workshop]** paper: [Adaptive Information Control for Search-Augmented LLM Reasoning](https://arxiv.org/pdf/2602.01672).
 
 Search-augmented LLM agents have become a powerful paradigm for solving knowledge-intensive tasks.
 However, naive retrieval often introduces redundant evidence, long contexts, and unstable reasoning behaviors.
@@ -20,15 +20,11 @@ Based on this formulation, the framework introduces three key mechanisms:
 * **Retrieval continuation control**
   → Decide *when to continue or stop retrieving*
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/search_definition.png" width="650">
-</p>
-
 * **Granularity control**
   → Decide *how much information to expand*
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/Granularity_control.png" width="750">
+  <img src="https://raw.githubusercontent.com/xiongsiheng/DeepControl/main/misc/DeepControl.png" width="750">
 </p>
 
 * **Annealed control training**
@@ -42,7 +38,7 @@ Together, these mechanisms transform retrieval from a passive tool into an activ
 
 | Model      | Search-R1 | Ours      | Improvement |
 | ---------- | --------- | --------- | ----------- |
-| Qwen2.5-7B | 0.431     | **0.479** | +9.4%       |
+| Qwen2.5-7B | 0.385     | **0.479** | +9.4%       |
 | Qwen2.5-3B | 0.325     | **0.411** | +8.6%       |
 
 
@@ -168,7 +164,7 @@ bash scripts/entryretrieval_launch_CPU.sh
 # bash scripts/entryretrieval_launch.sh
 ```
 
-2. Run agentic inference
+2. Run agentic inference:
 Retrieved information will be added as user messages, which allows compatibility with most APIs, including proprietary models.
 ```bash
 conda activate deepcontrol
@@ -179,8 +175,32 @@ bash scripts/run_local_vllm_service.sh
 bash scripts/infer_fast.sh
 ```
 
+## Datasets
+
+All the datasets can be found at [here](https://huggingface.co/datasets/RUC-NLPIR/FlashRAG_datasets).
+
+## Checkpoints
+
+We release the following DeepControl checkpoints on Hugging Face:
+
+| Checkpoint | Base model |
+| ---------- | ---------- |
+| [DeepControl-Qwen2.5-3B](https://huggingface.co/sxiong/DeepControl-Qwen2.5-3B) | Qwen2.5-3B-Instruct |
+| [DeepControl-Qwen2.5-7B](https://huggingface.co/sxiong/DeepControl-Qwen2.5-7B) | Qwen2.5-7B-Instruct |
+
+The checkpoints use the standard Hugging Face format and can be loaded directly with Transformers or served with vLLM. For example:
+
+```bash
+vllm serve sxiong/DeepControl-Qwen2.5-3B \
+  --served-model-name deepcontrol-qwen25-3b \
+  --dtype bfloat16 \
+  --max-model-len 8192 \
+  --port 8001
+```
+
 #### API Keys
-If you want to run the system with external inference APIs (e.g., OpenAI, TogetherAI, DeepSeek, Aliyun), you need to configure the corresponding API keys.
+
+If you want to run the system with external inference APIs (e.g., OpenAI, DeepSeek, Aliyun), you need to configure the corresponding API keys.
 ```bash
 cp env.sample .env
 ```
@@ -188,16 +208,30 @@ Edit .env with your API keys
 ```bash
 # LLM keys
 OPENAI_API_KEY=
-TOGETHER_API_KEY=
 DEEPSEEK_API_KEY=
 ALIYUN_API_KEY=
 ```
 
+## Outputs
 
-## Datasets
+We release the evaluation trajectories at [sxiong/deepcontrol_output](https://huggingface.co/datasets/sxiong/deepcontrol_output). Each benchmark contains outputs from DeepControl-Qwen2.5-3B, DeepControl-Qwen2.5-7B, DeepSeek-V4-Flash, and GPT-5.6-Luna.
 
-All the datasets can be found at [here](https://huggingface.co/datasets/RUC-NLPIR/FlashRAG_datasets).
+Load a subset with the Hugging Face `datasets` library:
 
+```python
+from datasets import load_dataset
+
+outputs = load_dataset(
+    "sxiong/deepcontrol_output",
+    "hotpotqa_dev_DeepControl-Qwen2.5-7B",
+    split="train",
+)
+
+example = outputs[0]
+print(example["question"])
+print(example["pred_answer"], example["final_correct"])
+print(example["actions"])
+```
 
 ## Acknowledge
 
@@ -208,9 +242,9 @@ We sincerely appreciate these teams for their open-source contributions.
 ## Citation
 
 ```bibtex
-@article{xiong2026scaling,
-  title={Scaling Search-Augmented LLM Reasoning via Adaptive Information Control},
-  author={Xiong, Siheng and Gungordu, Oguzhan and Johnson, Blair and Kerce, James C and Fekri, Faramarz},
+@article{xiong2026adaptive,
+  title={Adaptive Information Control for Search-Augmented LLM Reasoning},
+  author={Xiong, Siheng and Gungordu, Oguzhan and Kerce, James C and Fekri, Faramarz},
   journal={arXiv preprint arXiv:2602.01672},
   year={2026}
 }

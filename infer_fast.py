@@ -64,7 +64,7 @@ Correct: <answer>February 20, 2017</answer>
 
 
 Round definition
-A round MUST be one of the following two sequences:
+A round MUST be one of the following sequences:
 
 1) Answering round:
    <think>...</think>
@@ -84,6 +84,13 @@ A round MUST be one of the following two sequences:
    <expand>...</expand>
    <information>...</information>
    <think>...</think>
+
+3) Direct-answer round:
+   <answer>...</answer>
+
+4) Reasoned direct-answer round:
+   <think>...</think>
+   <answer>...</answer>
 
 You may perform as many rounds as needed.
 
