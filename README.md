@@ -42,7 +42,7 @@ Together, these mechanisms transform retrieval from a passive tool into an activ
 
 | Model      | Search-R1 | Ours      | Improvement |
 | ---------- | --------- | --------- | ----------- |
-| Qwen2.5-7B | 0.431     | **0.479** | +9.4%       |
+| Qwen2.5-7B | 0.385     | **0.479** | +9.4%       |
 | Qwen2.5-3B | 0.325     | **0.411** | +8.6%       |
 
 
