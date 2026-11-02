@@ -368,6 +368,10 @@ if __name__ == "__main__":
     parser.add_argument("--retriever_model", type=str, default="intfloat/e5-base-v2", help="Path of the retriever model.")
     parser.add_argument('--faiss_gpu', action='store_true', help='Use GPU for computation')
 
+    parser.add_argument("--port", type=int, default=8000)
+    # Loopback by default: the inference client normally runs on the same machine. Pass
+    # --host 0.0.0.0 only on a private network where another host must reach it.
+    parser.add_argument("--host", type=str, default="127.0.0.1")
     args = parser.parse_args()
     
     # 1) Build a config (could also parse from arguments).
@@ -389,4 +393,4 @@ if __name__ == "__main__":
     retriever = get_retriever(config)
     
     # 3) Launch the server. By default, it listens on http://127.0.0.1:8000
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=args.host, port=args.port)

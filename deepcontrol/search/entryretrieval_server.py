@@ -479,13 +479,16 @@ def main():
     parser.add_argument("--nprobe", type=int, default=None)
 
     parser.add_argument("--port", type=int, default=8000)
+    # Loopback by default: the inference client normally runs on the same machine. Pass
+    # --host 0.0.0.0 only on a private network where another host must reach it.
+    parser.add_argument("--host", type=str, default="127.0.0.1")
 
     args = parser.parse_args()
     app.state.config = args
 
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host=args.host,
         port=args.port,
         workers=1,  # FAISS GPU: keep 1
     )

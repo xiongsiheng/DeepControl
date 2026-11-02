@@ -38,6 +38,8 @@ CONTROL
 
 
 General rules
+- This is only a wording rule and MUST NOT change whether you use search or expand. Never skip a search required by the routing rules. Do not use generic or reusable text inside <think>. Every think block must discuss question-specific entities, relations, or evidence. Never say that a question is straightforward, factual, or answerable directly from memory.
+- If you choose a <search> or <expand> action, first output one complete <think>...</think> block. A direct <answer> action may either include or omit a think block.
 - Whenever you receive NEW information (from <search_results>, <information>), you MUST first reason inside <think>...</think>.
 - You can call a search engine using: <search>query</search>.
   The environment will return snippets inside: <search_results>...</search_results>.
@@ -747,6 +749,7 @@ def run_over_dataset(
     api_key: Optional[str],
     out_jsonl: str,
     max_samples: Optional[int] = None,
+    start_index: int = 0,
     topk: int = 10,
     max_turns: int = 20,
     temperature: float = 0.6,
@@ -759,8 +762,12 @@ def run_over_dataset(
 ):
     ds = load_dataset(dataset_repo_path, config_name)[split]
 
-    n = len(ds) if max_samples is None else min(len(ds), max_samples)
-    print(f"[INFO] split={split}, total={len(ds)}, running={n}")
+    # start_index / max_samples select a contiguous row range, so several processes can
+    # split one dataset between them (see scripts/infer_fast_parallel.sh).
+    start_index = max(0, min(start_index, len(ds)))
+    remaining = len(ds) - start_index
+    n = remaining if max_samples is None else min(remaining, max_samples)
+    print(f"[INFO] split={split}, total={len(ds)}, start={start_index}, running={n}")
 
  
     done_qids = set()
@@ -792,7 +799,7 @@ def run_over_dataset(
 
     # -------- prepare jobs --------
     jobs = []
-    for i in range(n):
+    for i in range(start_index, start_index + n):
         ex = ds[i]
         qid = ex["id"]
         if resume and (qid in done_qids):
@@ -932,6 +939,7 @@ def main():
     parser.add_argument("--dataset_repo_path", type=str, default="FlashRAG_datasets")
     parser.add_argument("--config_name", type=str, default="nq")
     parser.add_argument("--split", type=str, default="train")
+    parser.add_argument("--start_index", type=int, default=0)
     parser.add_argument("--max_samples", type=int, default=None)
 
     # retriever
@@ -1005,6 +1013,7 @@ def main():
             api_key=args.api_key,
             out_jsonl=args.out_jsonl,
             max_samples=args.max_samples,
+            start_index=args.start_index,
             topk=args.topk,
             max_turns=args.max_turns,
             temperature=args.temperature,

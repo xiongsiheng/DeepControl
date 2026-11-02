@@ -8,7 +8,7 @@ import time
 
 
 
-def _print_failed_request(self, url: str, payload: dict, resp=None, exc=None):
+def _print_failed_request(url: str, payload: dict, resp=None, exc=None):
     print("\n===== RETRIEVER REQUEST FAILED =====")
     print("URL:", url)
     print("Payload:", json.dumps(payload, ensure_ascii=False))
@@ -63,7 +63,7 @@ class EntryRetrieverClient:
         }
     """
 
-    def __init__(self, base_url: str, topk: int = 8, timeout_s: int = 30, num_attempts: int = 1):
+    def __init__(self, base_url: str, topk: int = 8, timeout_s: int = 30, num_attempts: int = 3):
         self.base_url = base_url.rstrip("/")
         self.topk = topk
         self.timeout_s = timeout_s
@@ -112,7 +112,7 @@ class EntryRetrieverClient:
             return entries
           
           except requests.HTTPError as e:
-              self._print_failed_request(
+              _print_failed_request(
                   url,
                   payload,
                   resp=e.response,
@@ -122,7 +122,7 @@ class EntryRetrieverClient:
               time.sleep(wait)
 
           except Exception as e:
-              self._print_failed_request(
+              _print_failed_request(
                   url,
                   payload,
                   exc=e,
@@ -156,7 +156,7 @@ class EntryRetrieverClient:
             return expanded
 
           except requests.HTTPError as e:
-              self._print_failed_request(
+              _print_failed_request(
                   url,
                   payload,
                   resp=e.response,
@@ -166,7 +166,7 @@ class EntryRetrieverClient:
               time.sleep(wait)
 
           except Exception as e:
-              self._print_failed_request(
+              _print_failed_request(
                   url,
                   payload,
                   exc=e,

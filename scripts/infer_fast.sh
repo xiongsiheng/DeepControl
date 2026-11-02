@@ -9,7 +9,7 @@ python infer_fast.py \
   --topk 5 \
   --retriever_url http://127.0.0.1:8000 \
   --max_turns 8 \
-  --max_tokens 2048 \
+  --max_tokens 512 \
   --temperature 0 \
-  --num_workers 8 \
+  --num_workers 16 \
   --out_jsonl results/infer_deepcontrol-qwen25-3b_hotpotqa_topk5_max_turns_8_temperature_0.jsonl

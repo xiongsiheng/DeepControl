@@ -73,6 +73,17 @@ pip install flash-attn --no-build-isolation
 pip install wandb
 ```
 
+### Inference environment
+
+Serving the released checkpoints and running `infer_fast.py` uses a separate environment.
+
+```bash
+conda create -n deepcontrol-infer python=3.11
+conda activate deepcontrol-infer
+pip install -r requirements-infer.txt
+pip install datasets
+```
+
 ### Retriever environment (Optional)
 
 If you want to run a local retriever server, we recommend a separate environment.
@@ -167,12 +178,24 @@ bash scripts/entryretrieval_launch_CPU.sh
 2. Run agentic inference:
 Retrieved information will be added as user messages, which allows compatibility with most APIs, including proprietary models.
 ```bash
-conda activate deepcontrol
+conda activate deepcontrol-infer
 
-# Optional: local inference
+# Optional: local inference on one GPU
 bash scripts/run_local_vllm_service.sh
 
 bash scripts/infer_fast.sh
+```
+
+On a multi-GPU machine, serve one vLLM instance per GPU behind a least-busy proxy and split a
+dataset across several concurrent client processes:
+
+```bash
+conda activate deepcontrol-infer
+MODEL=sxiong/DeepControl-Qwen2.5-3B SERVED_NAME=deepcontrol-qwen25-3b NUM_GPUS=8 \
+  bash scripts/run_local_vllm_pool.sh          # proxy at http://127.0.0.1:8001/v1
+
+CONFIG=hotpotqa SPLIT=dev MODEL=deepcontrol-qwen25-3b NUM_PROCS=8 NUM_WORKERS=16 \
+  bash scripts/infer_fast_parallel.sh
 ```
 
 ## Datasets
@@ -195,6 +218,7 @@ vllm serve sxiong/DeepControl-Qwen2.5-3B \
   --served-model-name deepcontrol-qwen25-3b \
   --dtype bfloat16 \
   --max-model-len 8192 \
+  --host 127.0.0.1 \
   --port 8001
 ```
 
