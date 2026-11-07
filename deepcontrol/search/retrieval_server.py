@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import warnings
 from typing import List, Dict, Optional
 import argparse
@@ -14,6 +15,8 @@ import datasets
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
+
+from gpu_flat import build_gpu_flat
 
 def load_corpus(corpus_path: str):
     corpus = datasets.load_dataset(
@@ -39,9 +42,11 @@ def load_model(model_path: str, use_fp16: bool = False):
     model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
     model.eval()
-    model.cuda()
-    if use_fp16: 
-        model = model.half()
+    # the CPU retriever environment has CPU-only torch
+    if torch.cuda.is_available():
+        model.cuda()
+        if use_fp16:
+            model = model.half()
     tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, trust_remote_code=True)
     return model, tokenizer
 
@@ -94,7 +99,7 @@ class Encoder:
                                 truncation=True,
                                 return_tensors="pt"
                                 )
-        inputs = {k: v.cuda() for k, v in inputs.items()}
+        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
 
         if "T5" in type(self.model).__name__:
             # T5-based retrieval model
@@ -209,10 +214,7 @@ class DenseRetriever(BaseRetriever):
         super().__init__(config)
         self.index = faiss.read_index(self.index_path)
         if config.faiss_gpu:
-            co = faiss.GpuMultipleClonerOptions()
-            co.useFloat16 = True
-            co.shard = True
-            self.index = faiss.index_cpu_to_all_gpus(self.index, co=co)
+            self.index = build_gpu_flat(faiss.downcast_index(self.index), list(range(faiss.get_num_gpus())))
 
         self.corpus = load_corpus(self.corpus_path)
         self.encoder = Encoder(
@@ -322,6 +324,9 @@ class QueryRequest(BaseModel):
 
 
 app = FastAPI()
+# FastAPI runs this sync endpoint in a thread pool; one retrieval (encoder + index search) at
+# a time
+retrieval_lock = threading.Lock()
 
 @app.post("/retrieve")
 def retrieve_endpoint(request: QueryRequest):
@@ -338,11 +343,12 @@ def retrieve_endpoint(request: QueryRequest):
         request.topk = config.retrieval_topk  # fallback to default
 
     # Perform batch retrieval
-    results, scores = retriever.batch_search(
-        query_list=request.queries,
-        num=request.topk,
-        return_score=request.return_scores
-    )
+    with retrieval_lock:
+        results, scores = retriever.batch_search(
+            query_list=request.queries,
+            num=request.topk,
+            return_score=True
+        )
     
     # Format response
     resp = []

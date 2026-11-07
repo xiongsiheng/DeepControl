@@ -355,47 +355,94 @@ def has_protocol_violation(messages):
 
 
 
+_CONTROL_RE = re.compile(r"<control>(.*?)</control>", re.DOTALL)
+_ACTION_RE = re.compile(r"<(search|expand|answer)>(.*?)</\1>", re.DOTALL)
+
+
+def _last_action(assistant_text):
+    m = list(_ACTION_RE.finditer(assistant_text or ""))
+    return (m[-1].group(1), m[-1].group(2)) if m else (None, "")
+
+
+def count_control_noncompliance(messages):
+    """Control messages the next assistant turn did not follow.
+
+    Stop -> must answer; continue -> must search; expand [ids] -> must expand one of them;
+    do-not-expand -> must not expand. A control with no following assistant turn is not
+    counted.
+    """
+    from deepcontrol.protocol import CONTROL_CONTINUE, CONTROL_NO_EXPAND, CONTROL_STOP
+
+    violations = 0
+    for k, msg in enumerate(messages):
+        if msg["role"] != "user":
+            continue
+        controls = ["<control>" + c + "</control>" for c in _CONTROL_RE.findall(msg["content"])]
+        if not controls:
+            continue
+        nxt = next((m for m in messages[k + 1:] if m["role"] == "assistant"), None)
+        if nxt is None:
+            continue
+        act, content = _last_action(nxt["content"])
+        for c in controls:
+            if c == CONTROL_STOP:
+                violations += act != "answer"
+            elif c == CONTROL_CONTINUE:
+                violations += act != "search"
+            elif c == CONTROL_NO_EXPAND:
+                violations += act == "expand"
+            elif c.startswith("<control>Expand the retrieved documents:"):
+                wanted = set(re.findall(r"\d+", c))
+                got = set(re.findall(r"\d+", content)) if act == "expand" else set()
+                violations += not (wanted & got)
+    return violations
+
+
+_CHATML_SPECIAL_RE = re.compile(r"<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>")
+
+
+def count_format_violations(messages):
+    """Assistant turns with text outside one optional <think> block and the first closed action
+    (e.g. a copied <control> wrapper). Rollouts keep the sampled tokens up to the action
+    (sampled_tokens), so such text is in the trajectory; inference drops it silently."""
+    from deepcontrol.llm_agent.deep_research_agent import DeepResearchAgent
+
+    def squash(x):
+        return re.sub(r"\s+", " ", x).strip()
+
+    n = 0
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        content = _CHATML_SPECIAL_RE.sub("", msg.get("content", ""))
+        n += squash(content) != squash(DeepResearchAgent.truncate_to_one_action(content))
+    return n
+
+
 def compute_final_reward(
     solution_str,
     ground_truth,
     format_floor=0.1,
     penalty_per_hit=0.2,
     penalty_cap=0.4,
-    search_bonus=0.1,
-    imperfect_ceiling=0.9,
+    stray_text_penalty=0.0,
     **kwargs,
 ):
-    # 1. parse chat
+    """Composite reward.
+
+    r = max(F1, format_floor) if the trajectory ends with an answer, else 0; minus
+    min(penalty_per_hit * N, penalty_cap), where N counts tool-usage violations (invalid
+    actions or inputs, empty expansions) and control non-compliance; stray_text_penalty per
+    turn with text outside [think] + action joins it under the same cap. The penalty is
+    applied after the floor, so a violating trajectory can score below the floor.
+    """
     messages = parse_chatml_messages(solution_str)
-
-    # 2. extract terminal answer
-    # answer = extract_answer_from_last_assistant(solution_str)
-    answer = extract_answer_from_last_message(messages[-1])
-    if answer is None:
+    if not messages:
         return 0.0
-
-    # 3. base QA reward
-    f1 = soft_em_f1(answer, ground_truth["target"])
-    reward = max(f1, format_floor)
-
-    # print(reward)
-
-    # 4. tool penalty
-    penalty = compute_tool_penalty(
-        messages,
-        penalty_per_hit=penalty_per_hit,
-    )
-    penalty = min(penalty, penalty_cap)
-    reward = max(reward - penalty, format_floor)
-
-    # print(reward)
-
-    # 5. search bonus (only if not fully correct)
-    if f1 < 1.0:
-        docs = collect_user_documents(messages)
-        if found_answer_in_documents(docs, ground_truth["target"]):
-            reward = min(reward + search_bonus, imperfect_ceiling)
-
-    # print(reward)
-
-    return reward
+    answer = extract_answer_from_last_message(messages[-1])
+    reward = 0.0 if answer is None else max(soft_em_f1(answer, ground_truth["target"]), format_floor)
+    n_tool = compute_tool_penalty(messages, penalty_per_hit=1.0)
+    n_control = count_control_noncompliance(messages)
+    n_stray = count_format_violations(messages) if stray_text_penalty else 0
+    penalty = min(penalty_per_hit * (n_tool + n_control) + stray_text_penalty * n_stray, penalty_cap)
+    return reward - penalty

@@ -13,6 +13,7 @@ from datasets import load_dataset
 
 from deepcontrol.llm_agent.deep_research_agent import DeepResearchAgent
 from deepcontrol.llm_agent.entry_retriever import EntryRetrieverClient
+from deepcontrol.protocol import PREFIX, CONTROL_STOP, invalid_action
 
 
 import multiprocessing as mp
@@ -27,76 +28,9 @@ def _init_worker(retriever_sem):
 
 
 
-prefix = """Answer the given question.
-
-You MUST follow the protocol below.
-
-CONTROL
-- A control message may appear anywhere in the conversation in the form:
-  <control>...</control>
-- You MUST follow the <control> message that appears in the context.
-
-
-General rules
-- This is only a wording rule and MUST NOT change whether you use search or expand. Never skip a search required by the routing rules. Do not use generic or reusable text inside <think>. Every think block must discuss question-specific entities, relations, or evidence. Never say that a question is straightforward, factual, or answerable directly from memory.
-- If you choose a <search> or <expand> action, first output one complete <think>...</think> block. A direct <answer> action may either include or omit a think block.
-- Whenever you receive NEW information (from <search_results>, <information>), you MUST first reason inside <think>...</think>.
-- You can call a search engine using: <search>query</search>.
-  The environment will return snippets inside: <search_results>...</search_results>.
-- If you want full text, you MUST decide inside <think>...</think>, then request expansion using: <expand>{"doc_ids": [id1, id2, ...]}</expand>
-  The environment will return the expanded full text inside: <information>...</information>. You can expand multiple documents in one call by listing multiple doc_ids.
-- If no further external knowledge is needed, output the final answer inside <answer>...</answer>.
-
-
-Answer normalization rules (VERY IMPORTANT)
-- The final answer MUST EXACTLY match the canonical short answer.
-- Output the SHORTEST possible answer span.
-- Do NOT add explanations, appositives, or parentheses.
-- Do NOT add extra words, punctuation, or formatting.
-- Use the most common name form that appears as a standalone answer.
-- If multiple aliases exist, choose the most standard short form.
-- Case-sensitive matching is required.
-
-Examples:
-Q: how many episodes are in series 7 game of thrones?
-Correct: <answer>seven</answer>
-
-Q: when does season 5 of bates motel come out?
-Correct: <answer>February 20, 2017</answer>
-
-
-Round definition
-A round MUST be one of the following sequences:
-
-1) Answering round:
-   <think>...</think>
-   <search>...</search>
-   <search_results>...</search_results>
-   <think>...</think>
-   <expand>...</expand>
-   <information>...</information>
-   <think>...</think>
-   <answer>...</answer>
-
-2) Continuing round:
-   <think>...</think>
-   <search>...</search>
-   <search_results>...</search_results>
-   <think>...</think>
-   <expand>...</expand>
-   <information>...</information>
-   <think>...</think>
-
-3) Direct-answer round:
-   <answer>...</answer>
-
-4) Reasoned direct-answer round:
-   <think>...</think>
-   <answer>...</answer>
-
-You may perform as many rounds as needed.
-
-"""
+# The task prompt, control messages and invalid-action feedback live in deepcontrol/protocol.py,
+# shared with RL training so both see identical text.
+prefix = PREFIX
 
 
 def my_gpt_completion(
@@ -441,28 +375,14 @@ def run_tool_episode(
     state = NEED_SEARCH
 
     def _invalid(reason: str):
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"Invalid action: {reason}\n"
-                    "Output exactly ONE of:\n"
-                    "<search>...</search>\n"
-                    "<expand>{\"doc_ids\":[...]}</expand>\n"
-                    "<answer>...</answer>\n"
-                ),
-            }
-        )
+        messages.append({"role": "user", "content": invalid_action(reason)})
 
     final_answer = None
     final_correct = None
 
     for turn in range(max_turns):
         if turn == max_turns - 2:  # Force to end
-            messages.append({
-                "role": "user",
-                "content": '<control>Stop searching.</control>'
-            })
+            messages.append({"role": "user", "content": CONTROL_STOP})
 
         raw = my_gpt_completion(
             model_name=model,
@@ -936,7 +856,7 @@ def main():
     parser.add_argument("--gold", type=str, nargs="*", default=["Wilhelm Conrad Röntgen", "Wilhelm Rontgen", "Röntgen"])
 
     # dataset params
-    parser.add_argument("--dataset_repo_path", type=str, default="FlashRAG_datasets")
+    parser.add_argument("--dataset_repo_path", type=str, default="RUC-NLPIR/FlashRAG_datasets")
     parser.add_argument("--config_name", type=str, default="nq")
     parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--start_index", type=int, default=0)

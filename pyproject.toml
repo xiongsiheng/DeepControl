@@ -28,21 +28,6 @@ authors = [
   { name = "Bytedance - Seed - MLSys", email = "gmsheng@connect.hku.hk" },
 ]
 
-# Dependencies corresponding to install_requires in setup.py
-dependencies = [
-    "accelerate",
-    "codetiming",
-    "datasets",
-    "dill",
-    "hydra-core",
-    "numpy",
-    "pybind11",
-    "ray",
-    "tensordict",
-    "transformers<4.48",
-    "vllm<=0.6.3",
-]
-
 # Optional dependencies (extras_require in setup.py)
 [project.optional-dependencies]
 test = [

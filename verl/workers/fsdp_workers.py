@@ -34,6 +34,7 @@ from verl.utils.fsdp_utils import get_fsdp_wrap_policy, offload_fsdp_grad, init_
 from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_param_and_grad, load_fsdp_optimizer, \
     load_fsdp_param_and_grad
 from verl.utils.import_utils import import_external_libs
+from verl.utils.train_state import save_fsdp_train_state, load_fsdp_train_state
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.flops_counter import FlopsCounter
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
@@ -58,6 +59,22 @@ def _resolve_local_cuda_rank() -> int:
     if local_rank < 0 or local_rank >= visible_gpus:
         return 0
     return local_rank
+
+
+def _move_train_state(worker, module, optimizer, to_gpu: bool):
+    """Put parameters and optimizer state on GPU (to_gpu) or back where training keeps them."""
+    if to_gpu:
+        if worker._is_offload_param:
+            load_fsdp_param_and_grad(module=module, device_id=torch.cuda.current_device(),
+                                     load_grad=worker._is_offload_grad)
+        if worker._is_offload_optimizer:
+            load_fsdp_optimizer(optimizer=optimizer, device_id=torch.cuda.current_device())
+    else:
+        if worker._is_offload_param:
+            offload_fsdp_param_and_grad(module=module, offload_grad=worker._is_offload_grad)
+        if worker._is_offload_optimizer:
+            offload_fsdp_optimizer(optimizer=optimizer)
+        torch.cuda.empty_cache()
 
 
 class ActorRolloutRefWorker(Worker):
@@ -349,6 +366,7 @@ class ActorRolloutRefWorker(Worker):
             self.actor = DataParallelPPOActor(config=self.config.actor,
                                               actor_module=self.actor_module_fsdp,
                                               actor_optimizer=self.actor_optimizer)
+            self.actor.optimizer_offload = self._is_offload_optimizer
 
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout()
@@ -386,12 +404,15 @@ class ActorRolloutRefWorker(Worker):
 
 
         assert self._is_actor
+        # the rollout weights cached in vLLM (if any) are stale from here on
+        sm = getattr(self, 'rollout_sharding_manager', None)
+        if sm is not None and hasattr(sm, 'actor_version'):
+            sm.actor_version += 1
         if self._is_offload_param:
             load_fsdp_param_and_grad(module=self.actor_module_fsdp,
                                      device_id=torch.cuda.current_device(),
                                      load_grad=self._is_offload_grad)
-        if self._is_offload_optimizer:
-            load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
+        # an offloaded optimizer state comes to the GPU inside each optimizer step only
 
         data.batch = data.batch.cuda()
 
@@ -473,7 +494,11 @@ class ActorRolloutRefWorker(Worker):
         recompute_log_prob = prompts.meta_info.get('recompute_log_prob', True)
 
         assert self._is_rollout
-        if self._is_offload_param:
+        # The FSDP parameters are needed on GPU only to sync them into vLLM or to recompute
+        # log-probs; with the rollout weight cache on, later calls of a rollout need neither.
+        need_sync = getattr(self.rollout_sharding_manager, 'needs_sync', True)
+        load_params = self._is_offload_param and (need_sync or (self._is_actor and recompute_log_prob))
+        if load_params:
             load_fsdp_param_and_grad(module=self.actor_module_fsdp,
                                      device_id=torch.cuda.current_device(),
                                      load_grad=self._is_offload_grad)
@@ -506,13 +531,34 @@ class ActorRolloutRefWorker(Worker):
 
         output = output.to('cpu')
 
-        if self._is_offload_param:
+        if load_params:
             # NOTE(sgm): the grad is already in CPU, only offload param here
             offload_fsdp_param_and_grad(module=self.actor_module_fsdp, offload_grad=self._is_offload_grad)
         # clear kv cache
         torch.cuda.empty_cache()
         log_gpu_memory_usage('After recompute log prob', logger=logger)
         return output
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_rollout_weight_cache(self, enable: bool):
+        """Keep the synced rollout weights in vLLM across generate calls (one multi-turn rollout,
+        during which the actor does not change); disabling drops them before training resumes."""
+        sm = getattr(self, 'rollout_sharding_manager', None)
+        if sm is None or not hasattr(sm, 'keep_weights'):
+            return
+        sm.keep_weights = bool(enable)
+        # With free_cache_engine off, vLLM's KV cache (gpu_memory_utilization of the GPU) would
+        # stay allocated through the actor and critic updates; hold it only during rollouts.
+        engine = sm.inference_engine
+        if enable and not self.config.rollout.free_cache_engine and getattr(self, '_kv_cache_freed', False):
+            engine.init_cache_engine()
+            self._kv_cache_freed = False
+        if not enable:
+            sm.release_weights()
+            if not self.config.rollout.free_cache_engine:
+                engine.free_cache_engine()
+                self._kv_cache_freed = True
+            torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data: DataProto):
@@ -571,6 +617,29 @@ class ActorRolloutRefWorker(Worker):
         torch.distributed.barrier()
         if self._is_offload_param:
             offload_fsdp_param_and_grad(module=self.actor_module_fsdp, offload_grad=self._is_offload_grad)
+
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def save_train_state(self, path):
+        assert self._is_actor
+        _move_train_state(self, self.actor_module_fsdp, self.actor_optimizer, to_gpu=True)
+        save_fsdp_train_state(path, self.rank, self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler)
+        _move_train_state(self, self.actor_module_fsdp, self.actor_optimizer, to_gpu=False)
+        torch.distributed.barrier()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def load_train_state(self, path):
+        assert self._is_actor
+        _move_train_state(self, self.actor_module_fsdp, self.actor_optimizer, to_gpu=True)
+        checksum = load_fsdp_train_state(path, self.rank, self.actor_module_fsdp, self.actor_optimizer,
+                                         self.actor_lr_scheduler)
+        _move_train_state(self, self.actor_module_fsdp, self.actor_optimizer, to_gpu=False)
+        # cached rollout weights (if any) predate the loaded actor
+        sm = getattr(self, 'rollout_sharding_manager', None)
+        if sm is not None and hasattr(sm, 'actor_version'):
+            sm.actor_version += 1
+        torch.distributed.barrier()
+        return checksum
 
 
 class CriticWorker(Worker):
@@ -741,6 +810,7 @@ class CriticWorker(Worker):
         self.critic = DataParallelPPOCritic(config=self.config,
                                             critic_module=self.critic_module,
                                             critic_optimizer=self.critic_optimizer)
+        self.critic.optimizer_offload = self._is_offload_optimizer
 
         self.flops_counter = FlopsCounter(self.critic_model_config)
 
@@ -778,8 +848,7 @@ class CriticWorker(Worker):
             load_fsdp_param_and_grad(module=self.critic_module,
                                      device_id=torch.cuda.current_device(),
                                      load_grad=self._is_offload_grad)
-        if self._is_offload_optimizer:
-            load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=torch.cuda.current_device())
+        # an offloaded optimizer state comes to the GPU inside each optimizer step only
 
         # perform forward computation
         with self.ulysses_sharding_manager:
@@ -835,6 +904,23 @@ class CriticWorker(Worker):
         torch.distributed.barrier()
         if self._is_offload_param:
             offload_fsdp_param_and_grad(module=self.critic_module, offload_grad=self._is_offload_grad)
+
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def save_train_state(self, path):
+        _move_train_state(self, self.critic_module, self.critic_optimizer, to_gpu=True)
+        save_fsdp_train_state(path, self.rank, self.critic_module, self.critic_optimizer, self.critic_lr_scheduler)
+        _move_train_state(self, self.critic_module, self.critic_optimizer, to_gpu=False)
+        torch.distributed.barrier()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def load_train_state(self, path):
+        _move_train_state(self, self.critic_module, self.critic_optimizer, to_gpu=True)
+        checksum = load_fsdp_train_state(path, self.rank, self.critic_module, self.critic_optimizer,
+                                         self.critic_lr_scheduler)
+        _move_train_state(self, self.critic_module, self.critic_optimizer, to_gpu=False)
+        torch.distributed.barrier()
+        return checksum
 
 
 # TODO(sgm): we may need to extract it to dp_reward_model.py

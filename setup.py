@@ -22,10 +22,6 @@ with open(os.path.join(version_folder, 'verl/version/version')) as f:
     __version__ = f.read().strip()
 
 
-with open('requirements.txt') as f:
-    required = f.read().splitlines()
-    install_requires = [item.strip() for item in required if item.strip()[0] != '#']
-
 extras_require = {
     'test': ['pytest', 'yapf']
 }
@@ -44,7 +40,6 @@ setup(
     author='Bytedance - Seed - MLSys',
     author_email='zhangchi.usc1992@bytedance.com, gmsheng@connect.hku.hk',
     description='veRL: Volcano Engine Reinforcement Learning for LLM',
-    install_requires=install_requires,
     extras_require=extras_require,
     package_data={'': ['version/*'],
                   'verl': ['trainer/config/*.yaml'],},

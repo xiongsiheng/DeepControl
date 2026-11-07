@@ -16,7 +16,7 @@
 
 from omegaconf import ListConfig
 import os
-from typing import List, Union
+from typing import List, Optional, Union
 import json
 
 import pandas as pd
@@ -50,7 +50,7 @@ def _ensure_chat_list(chat):
         chat = [chat]
     return chat
 
-def set_system(chat, system_text: str | None):
+def set_system(chat, system_text: Optional[str]):  # Optional: the repo targets Python 3.9
     # `system_text=None` means no system prompt will be added (but some templates may automatically add a default system prompt).
     if system_text is None:
         return chat
@@ -167,7 +167,8 @@ class RLHFDataset(Dataset):
             prompt_with_chat_template = "\n".join([m.get("content", "") for m in chat])
         # prompt_with_chat_template = chat
 
-        prompt_with_chat_template = prompt_with_chat_template.replace('You are Qwen, created by Alibaba Cloud. ', '')
+        # Keep the template's default system message: inference (vLLM chat completions with no
+        # system message) renders it unchanged, so training must too.
 
         input_ids, attention_mask = verl_F.tokenize_and_postprocess_data(prompt=prompt_with_chat_template,
                                                                          tokenizer=self.tokenizer,

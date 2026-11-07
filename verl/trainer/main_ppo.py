@@ -38,10 +38,11 @@ class RewardManager():
     """The reward manager.
     """
 
-    def __init__(self, tokenizer, num_examine, format_score=0.) -> None:
+    def __init__(self, tokenizer, num_examine, format_score=0., stray_text_penalty=0.) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.format_score = format_score
+        self.stray_text_penalty = stray_text_penalty
 
     def __call__(self, data: DataProto):
         # always produce reward_tensor
@@ -80,7 +81,8 @@ class RewardManager():
             score = compute_score_fn(
                 solution_str=sequences_str,
                 ground_truth=ground_truth,
-                format_score=self.format_score
+                format_score=self.format_score,
+                stray_text_penalty=self.stray_text_penalty,
             )
 
             reward_tensor[i, valid_response_length - 1] = score
@@ -175,7 +177,9 @@ def main_task(config):
         role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
         mapping[Role.RewardModel] = global_pool_id
 
-    reward_fn = RewardManager(tokenizer=tokenizer, num_examine=1)
+    # validation reports the reward without the stray-text term, comparable across runs
+    reward_fn = RewardManager(tokenizer=tokenizer, num_examine=1,
+                              stray_text_penalty=config.get('stray_text_penalty', 0.1))
 
     # Save to logs/<project>_<exp>_train_rollouts.jsonl
     log_path = f"logs/{config.trainer.project_name}_{config.trainer.experiment_name}_train_rollouts.jsonl"
@@ -283,10 +287,11 @@ def wrap_reward_manager_with_logging(base_rm, out_path, tokenizer, tag="train"):
         return vals + [fill_value] * (target_len - len(vals))
 
     def _control_decision_to_text(decision):
+        from deepcontrol.protocol import CONTROL_CONTINUE, CONTROL_STOP
         if decision == "stop":
-            return "<control>Stop searching</control>"
+            return CONTROL_STOP
         if decision == "continue_once":
-            return "<control>Continue the search for one additional step</control>"
+            return CONTROL_CONTINUE
         return ""
 
     def logged_reward_fn(data_proto: DataProto):
@@ -317,9 +322,12 @@ def wrap_reward_manager_with_logging(base_rm, out_path, tokenizer, tag="train"):
                 meta.get("id")
             )
 
-            novelty = _get_list_from_meta(batch_meta, "novelty_curve_stats", i)
-            effectiveness = _get_list_from_meta(batch_meta, "effectiveness_curve_stats", i)
-            utility = _get_list_from_meta(batch_meta, "utility_curve_stats", i)
+            # Per-row traces (non_tensor_batch) follow the rows when the trainer reorders them.
+            novelty = _get_list_from_item_non_tensor(item, "trace_novelty")
+            effectiveness = _get_list_from_item_non_tensor(item, "trace_effectiveness")
+            utility = _get_list_from_item_non_tensor(item, "trace_utility")
+            granularity = _get_list_from_item_non_tensor(item, "trace_granularity")
+            controlled = bool(item.non_tensor_batch.get("trace_controlled", False))
             action_types = _get_list_from_item_non_tensor(item, "trace_action_types")
             closed_reasons = _get_list_from_item_non_tensor(item, "trace_closed_reasons")
             if not action_types:
@@ -333,12 +341,10 @@ def wrap_reward_manager_with_logging(base_rm, out_path, tokenizer, tag="train"):
             utility = _normalize_curve_len(utility, L, fill_value=0.0)
 
             control_message = [""] * L
-            intervention_stats = batch_meta.get("utility_intervention_stats", None)
-            if isinstance(intervention_stats, list) and i < len(intervention_stats):
-                decision = intervention_stats[i]
-                msg = _control_decision_to_text(decision)
-                if msg and L > 0:
-                    control_message[-1] = msg
+            decision = item.non_tensor_batch.get("trace_intervention", None)
+            msg = _control_decision_to_text(decision)
+            if msg and L > 0:
+                control_message[-1] = msg
 
             logs.append({
                 "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -358,6 +364,8 @@ def wrap_reward_manager_with_logging(base_rm, out_path, tokenizer, tag="train"):
                 "action_types": action_types,
                 "closed_reasons": closed_reasons,
                 "control_message": control_message,
+                "controlled": controlled,
+                "granularity_control": granularity,
             })
 
         with lock, open(out_path_proc, "a", encoding="utf-8") as f:

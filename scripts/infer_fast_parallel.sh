@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 CONFIG="${CONFIG:-hotpotqa}"
 SPLIT="${SPLIT:-dev}"
-DATASET_REPO_PATH="${DATASET_REPO_PATH:-FlashRAG_datasets}"
+DATASET_REPO_PATH="${DATASET_REPO_PATH:-RUC-NLPIR/FlashRAG_datasets}"
 MODEL="${MODEL:-deepcontrol-qwen25-3b}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8001/v1}"
 RETRIEVER_URL="${RETRIEVER_URL:-http://127.0.0.1:8000}"

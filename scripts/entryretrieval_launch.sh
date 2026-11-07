@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 python deepcontrol/search/entryretrieval_server_multi.py \
   --retriever_model intfloat/e5-base-v2 \

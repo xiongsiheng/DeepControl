@@ -520,7 +520,7 @@ def main():
     parser.add_argument("--verbose", action="store_true")
 
     parser.add_argument("--question", type=str, default="Who won the first Nobel Prize in Physics?")
-    parser.add_argument("--dataset_repo_path", type=str, default="FlashRAG_datasets")
+    parser.add_argument("--dataset_repo_path", type=str, default="RUC-NLPIR/FlashRAG_datasets")
     parser.add_argument("--config_name", type=str, default="nq")
     parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--max_samples", type=int, default=None)

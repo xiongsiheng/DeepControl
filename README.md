@@ -57,71 +57,60 @@ DeepControl/
 
 ## Installation
 
-### DeepControl environment
+Training, inference and retrieval each run in their own environment.
+
+### Training environment
 
 ```bash
 conda create -n deepcontrol python=3.9
 conda activate deepcontrol
-pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cu121
-pip install vllm==0.6.3
-
-# verl
-pip install -e .
-
-# flash attention 2
-pip install flash-attn --no-build-isolation
-pip install wandb
+pip install -r requirements-train.txt
+pip install -e . --no-deps
 ```
 
 ### Inference environment
-
-Serving the released checkpoints and running `infer_fast.py` uses a separate environment.
 
 ```bash
 conda create -n deepcontrol-infer python=3.11
 conda activate deepcontrol-infer
 pip install -r requirements-infer.txt
-pip install datasets
 ```
 
-### Retriever environment (Optional)
+### Retriever environment
 
-If you want to run a local retriever server, we recommend a separate environment.
+The retrievers run on CPU by default:
 
 ```bash
-conda create -n retriever python=3.10
+conda create -n retriever python=3.11
 conda activate retriever
-
-# torch for faiss-gpu
-conda install pytorch==2.4.0 pytorch-cuda=12.1 -c pytorch -c nvidia
-pip install transformers datasets pyserini
-
-# FAISS GPU
-conda install -c pytorch -c nvidia faiss-gpu=1.8.0
-
-# API server
-pip install uvicorn fastapi
+pip install -r requirements-retriever.txt
 ```
+
+`scripts/entryretrieval_launch_CPU.sh` starts 3 retriever processes behind a round-robin proxy on port 8000; each loads the index and corpus (about 80 GB of RAM), so use `NUM_BACKENDS=1` on smaller machines.
+
+Optional GPU retrievers use faiss-gpu from conda:
+
+```bash
+conda env create -f environment-retriever-gpu.yml
+conda activate retriever-gpu
+```
+
+The GPU retrievers hold the index in fp16 (about 32 GB) on the GPUs in `CUDA_VISIBLE_DEVICES` (default `0`), split across them when several are visible.
 
 ## Quick Start
 
 ### Training
 Train a search-augmented reasoning agent with e5 as the retriever and Wikipedia as corpus.
 
-1. Download the index and corpus.
+1. Download the index and corpus (about 80 GB, into `data/wiki18`).
 
 ```bash
-save_path=/the/path/to/save
-python scripts/download.py --save_path $save_path
-cat $save_path/part_* > $save_path/e5_Flat.index
-gzip -d $save_path/wiki-18.jsonl.gz
+bash scripts/download.sh
 ```
 
 2. Process datasets.
 
 ```bash
-python scripts/data_process/nq_search.py
-python scripts/data_process/hotpotqa_search.py
 python scripts/data_process/nq_hotpotqa_search.py
 ```
 
@@ -133,16 +122,24 @@ conda activate retriever
 bash scripts/entryretrieval_launch_CPU.sh
 ```
 
-4. Run RL training.
+4. Run RL training. The scripts log to Weights & Biases: run `wandb login` first, or set `WANDB_MODE=offline`.
 
 ```bash
 conda activate deepcontrol
-bash scripts/train_ppo.sh
-bash scripts/train_grpo.sh
+bash scripts/train_ppo_3b.sh
+bash scripts/train_grpo_3b.sh
+bash scripts/train_ppo_7b.sh
+bash scripts/train_grpo_7b.sh
 ```
 
 ### Inference
-DeepControl supports two inference modes.
+DeepControl supports two inference modes. Both need the retrieval index and corpus (about 80 GB), downloaded once into `data/wiki18`:
+
+```bash
+bash scripts/download.sh
+```
+
+The evaluation datasets are read from [RUC-NLPIR/FlashRAG_datasets](https://huggingface.co/datasets/RUC-NLPIR/FlashRAG_datasets) on Hugging Face (`DATASET_REPO_PATH=` points elsewhere, e.g. a local copy), and the models are downloaded from Hugging Face when the server starts. `MAX_SAMPLES=` runs only the first questions of a split.
 
 #### Baseline
 1. Launch local retrieval server:
@@ -151,17 +148,18 @@ The retriever returns raw passages and supports a single action, i.e., retrieve.
 conda activate retriever
 bash scripts/retrieval_launch_CPU.sh
 
-# Optional: GPU-based retriever
+# Optional: GPU-based retriever (conda activate retriever-gpu)
 # bash scripts/retrieval_launch.sh
 ```
 
 2. Run agentic inference:
 Requires APIs that support single-turn prefill (e.g. vLLM).
 ```bash
-conda activate deepcontrol
+conda activate deepcontrol-infer
 bash scripts/run_local_vllm_service_baseline.sh
 bash scripts/infer_vanilla_fast.sh
 ```
+Both scripts take the model from `MODEL=`; `CONFIG=` and `SPLIT=` select the dataset.
 
 
 #### DeepControl (Hierarchical Retrieval)
@@ -171,7 +169,7 @@ The retriever returns hierarchical retrieval results and supports two actions, i
 conda activate retriever
 bash scripts/entryretrieval_launch_CPU.sh
 
-# Optional: GPU-based retriever
+# Optional: GPU-based retriever (conda activate retriever-gpu)
 # bash scripts/entryretrieval_launch.sh
 ```
 
@@ -183,8 +181,9 @@ conda activate deepcontrol-infer
 # Optional: local inference on one GPU
 bash scripts/run_local_vllm_service.sh
 
-bash scripts/infer_fast.sh
+CONFIG=hotpotqa SPLIT=dev bash scripts/infer_fast.sh
 ```
+For the 7B checkpoint, use `MODEL=sxiong/DeepControl-Qwen2.5-7B SERVED_NAME=deepcontrol-qwen25-7b` for the server and `MODEL=deepcontrol-qwen25-7b` for inference; `MODEL=` also accepts a local checkpoint path.
 
 On a multi-GPU machine, serve one vLLM instance per GPU behind a least-busy proxy and split a
 dataset across several concurrent client processes:
@@ -235,6 +234,10 @@ OPENAI_API_KEY=
 DEEPSEEK_API_KEY=
 ALIYUN_API_KEY=
 ```
+Load them into the shell before running inference:
+```bash
+set -a; source .env; set +a
+```
 
 ## Outputs
 
@@ -247,8 +250,8 @@ from datasets import load_dataset
 
 outputs = load_dataset(
     "sxiong/deepcontrol_output",
-    "hotpotqa_dev_DeepControl-Qwen2.5-7B",
-    split="train",
+    "DeepControl-Qwen2.5-7B",
+    split="hotpotqa_dev",
 )
 
 example = outputs[0]

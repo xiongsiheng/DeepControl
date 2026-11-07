@@ -274,9 +274,56 @@ def compute_data_metrics(batch, use_critic=True):
         metrics['env/ratio_of_valid_action'] = float((np.array(batch.meta_info['valid_action_stats'], dtype=np.int16) / np.array(batch.meta_info['turns_stats'], dtype=np.int16)).mean())
     if 'valid_search_stats' in batch.meta_info:
         metrics['env/number_of_valid_search'] = float(np.array(batch.meta_info['valid_search_stats'], dtype=np.int16).mean())
+    if 'stray_text_stats' in batch.meta_info:
+        # share of policy turns with text outside [think] + action (e.g. a copied <control> tag)
+        metrics['env/ratio_of_stray_text'] = float(
+            sum(batch.meta_info['stray_text_stats']) / max(1, sum(batch.meta_info['policy_turn_stats'])))
+
+    # information control (per-rollout traces from the generation manager)
+    ntb = batch.non_tensor_batch
+    if 'trace_controlled' in ntb:
+        controlled = np.array([bool(x) for x in ntb['trace_controlled']])
+        decisions = list(ntb['trace_intervention'])
+        granularity = [list(g) for g in ntb['trace_granularity']]
+        metrics['control/gate_prob'] = float(batch.meta_info.get('utility_intervention_gate_prob', 0.0))
+        metrics['control/controlled_frac'] = float(controlled.mean())
+        metrics['control/stop_frac'] = float(np.mean([d == 'stop' for d in decisions]))
+        metrics['control/continue_frac'] = float(np.mean([d == 'continue_once' for d in decisions]))
+        metrics['control/expand_per_rollout'] = float(np.mean([g.count('expand') for g in granularity]))
+        metrics['control/no_expand_per_rollout'] = float(np.mean([g.count('no_expand') for g in granularity]))
+        for name in ('novelty', 'effectiveness', 'utility'):
+            vals = [float(v) for trace in ntb[f'trace_{name}'] for v in trace]
+            if vals:
+                metrics[f'control/{name}_mean'] = float(np.mean(vals))
 
 
     return metrics
+
+
+def epoch_batches(dataloader, epoch_rng=None, torch_rng=None, skip=0):
+    """Start one epoch of a shuffled dataloader; returns (epoch_rng, iterator of (index, batch)).
+
+    The sampler draws the epoch's order from the torch RNG when the first batch is fetched,
+    so the first batch is fetched here, after optionally restoring the epoch-start state
+    (epoch_rng) and before optionally restoring a later state (torch_rng). A resumed run
+    passes both from its checkpoint, gets the same order, and skips the first `skip` batches.
+    """
+    import itertools
+    if epoch_rng is not None:
+        torch.set_rng_state(epoch_rng)
+    start_state = torch.get_rng_state()
+    it = iter(dataloader)
+    first = next(it, None)
+    if torch_rng is not None:
+        torch.set_rng_state(torch_rng)
+
+    def gen():
+        if first is None:
+            return
+        for idx, b in enumerate(itertools.chain([first], it)):
+            if idx >= skip:
+                yield idx, b
+    return start_state, gen()
 
 
 def compute_timing_metrics(batch, timing_raw):
@@ -433,6 +480,47 @@ class RayPPOTrainer(object):
             self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
             self.config.critic.optim.total_training_steps = total_training_steps
 
+    def _make_gen_config(self) -> GenerationConfig:
+        """Rollout configuration shared by training and validation."""
+        c = self.config
+        return GenerationConfig(
+            max_turns=c.max_turns,
+            max_start_length=c.data.max_start_length,
+            max_prompt_length=c.data.max_prompt_length,
+            max_response_length=c.data.max_response_length,
+            max_obs_length=c.data.max_obs_length,
+            num_gpus=c.trainer.n_gpus_per_node * c.trainer.nnodes,
+            no_think_rl=c.algorithm.no_think_rl,
+            retriever_url=c.retriever.url,
+            topk=c.retriever.topk,
+            enable_utility_controller=c.get("enable_utility_controller", False),
+            control_mode=c.get("control_mode", "fast"),
+            utility_gamma=c.get("utility_gamma", 0.5),
+            utility_low_threshold=c.get("utility_low_threshold", 0.2),
+            utility_low_patience=c.get("utility_low_patience", 2),
+            utility_min_turns_before_stop=c.get("utility_min_turns_before_stop", 1),
+            utility_force_stop_after_turn=c.get("utility_force_stop_after_turn", None),
+            utility_continue_threshold=c.get("utility_continue_threshold", 0.3),
+            utility_continue_patience=c.get("utility_continue_patience", 2),
+            utility_continue_score_max=c.get("utility_continue_score_max", -2.0),
+            utility_continue_prob=c.get("utility_continue_prob", 1.0),
+            utility_intervention_schedule=c.get("utility_intervention_schedule", None),
+            utility_random_seed=c.get("utility_random_seed", None),
+            utility_novelty_encoder=c.get("utility_novelty_encoder", "intfloat/e5-base-v2"),
+            utility_novelty_knn_k=c.get("utility_novelty_knn_k", 5),
+            utility_novelty_emb_dim=c.get("utility_novelty_emb_dim", 768),
+            utility_novelty_max_length=c.get("utility_novelty_max_length", 512),
+            utility_novelty_threads=c.get("utility_novelty_threads", 16),
+            utility_cot_tokens=c.get("utility_cot_tokens", 128),
+            utility_eff_tau_low=c.get("utility_eff_tau_low", 0.3),
+            utility_eff_tau_high=c.get("utility_eff_tau_high", 3.0),
+            granularity_control=c.get("granularity_control", True),
+            sampled_tokens=c.get("sampled_tokens", True),
+            max_expand_docs=c.get("max_expand_docs", 3),
+            retrieval_workers=c.get("retrieval_workers", 64),
+            rollout_weight_cache=c.get("rollout_weight_cache", True),
+        )
+
     def _validate(self):
         """
         The training loop of PPO with global metric computation.
@@ -454,36 +542,7 @@ class RayPPOTrainer(object):
         #     topk = self.config.retriever.topk,
         # )
 
-        gen_config = GenerationConfig(
-            max_turns=self.config.max_turns,
-            max_start_length=self.config.data.max_start_length,
-            max_prompt_length=self.config.data.max_prompt_length,
-            max_response_length=self.config.data.max_response_length,
-            max_obs_length=self.config.data.max_obs_length,
-            num_gpus=self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes,
-            no_think_rl=self.config.algorithm.no_think_rl,
-            retriever_url=self.config.retriever.url,
-            topk=self.config.retriever.topk,
-            enable_utility_controller=self.config.get("enable_utility_controller", False),
-            utility_gamma=self.config.get("utility_gamma", 0.5),
-            utility_low_threshold=self.config.get("utility_low_threshold", 0.10),
-            utility_low_patience=self.config.get("utility_low_patience", 2),
-            utility_min_turns_before_stop=self.config.get("utility_min_turns_before_stop", 2),
-            utility_force_stop_after_turn=self.config.get("utility_force_stop_after_turn", None),
-            utility_continue_threshold=self.config.get("utility_continue_threshold", 0.25),
-            utility_continue_patience=self.config.get("utility_continue_patience", 2),
-            utility_continue_score_max=self.config.get("utility_continue_score_max", -2.0),
-            utility_continue_prob=self.config.get("utility_continue_prob", 0.10),
-            utility_intervention_schedule=self.config.get("utility_intervention_schedule", None),
-            utility_random_seed=self.config.get("utility_random_seed", None),
-            utility_novelty_encoder=self.config.get("utility_novelty_encoder", "intfloat/e5-base-v2"),
-            utility_novelty_knn_k=self.config.get("utility_novelty_knn_k", 5),
-            utility_novelty_emb_dim=self.config.get("utility_novelty_emb_dim", 768),
-            utility_novelty_max_length=self.config.get("utility_novelty_max_length", 256),
-            utility_cot_tokens=self.config.get("utility_cot_tokens", 512),
-            utility_eff_tau_low=self.config.get("utility_eff_tau_low", 0.05),
-            utility_eff_tau_high=self.config.get("utility_eff_tau_high", 0.20),
-        )
+        gen_config = self._make_gen_config()
 
         # Agent config preparation
         generation_manager = LLMGenerationManager(
@@ -693,25 +752,75 @@ class RayPPOTrainer(object):
 
 
     def _save_checkpoint(self):
-        actor_dir = os.path.join(self.config.trainer.default_local_dir, 'actor')
-        os.makedirs(actor_dir, exist_ok=True)
-
-        # 先把旧的清掉，保证有空间写新的
-        # self._cleanup_old_checkpoints(actor_dir, keep=0)  # 或 keep=1 但更推荐 0
-
-        # actor_local_path = os.path.join(actor_dir, f'global_step_{self.global_steps}')
-        actor_local_path = actor_dir
+        """Actor weights per save step (actor/global_step_N, kept for model selection); the
+        critic of the latest save step (critic/, overwritten)."""
+        import shutil
+        root = self.config.trainer.default_local_dir
+        actor_local_path = os.path.join(root, 'actor', f'global_step_{self.global_steps}')
         actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else \
-            os.path.join(self.config.trainer.default_hdfs_dir, 'actor')
-
+            os.path.join(self.config.trainer.default_hdfs_dir, 'actor', f'global_step_{self.global_steps}')
         try:
             self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path)
         except Exception:
-            # 失败也尽量别留下半成品目录
-            import shutil
+            # do not leave a partial checkpoint behind
             shutil.rmtree(actor_local_path, ignore_errors=True)
             raise
+        if self.use_critic:
+            critic_local_path = os.path.join(root, 'critic')
+            critic_remote_path = None if self.config.trainer.default_hdfs_dir is None else \
+                os.path.join(self.config.trainer.default_hdfs_dir, 'critic')
+            self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
+        self._save_train_state(root)
+        with open(os.path.join(root, 'latest_step.txt'), 'w') as f:
+            f.write(f'{self.global_steps}\n')
 
+    def _save_train_state(self, root):
+        """Everything a resumed run needs (root/train_state, replaced atomically): per-rank actor
+        and critic shards with optimizer and LR scheduler, and the driver state (step, position
+        in the epoch, data-order RNG, KL coefficient, controller RNG)."""
+        import shutil
+        tmp = os.path.join(root, 'train_state.tmp')
+        final = os.path.join(root, 'train_state')
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp)
+        self.actor_rollout_wg.save_train_state(os.path.join(tmp, 'actor'))
+        if self.use_critic:
+            self.critic_wg.save_train_state(os.path.join(tmp, 'critic'))
+        gm = getattr(self, '_train_generation_manager', None)
+        ctrl = getattr(gm, 'utility_controller', None) if gm is not None else None
+        torch.save({
+            'global_steps': self.global_steps,
+            'epoch': self._epoch,
+            'step_in_epoch': self._step_in_epoch,
+            'epoch_rng': self._epoch_rng,
+            'torch_rng': torch.get_rng_state(),
+            'kl_value': getattr(self.kl_ctrl, 'value', None),
+            'controller_rng': ctrl.rng.getstate() if ctrl is not None else None,
+        }, os.path.join(tmp, 'trainer.pt'))
+        # keep the previous resume point one save longer (train_state_prev), to roll back to
+        prev = os.path.join(root, 'train_state_prev')
+        shutil.rmtree(prev, ignore_errors=True)
+        if os.path.exists(final):
+            os.rename(final, prev)
+        os.rename(tmp, final)
+
+    def _load_train_state(self):
+        """Resume from default_local_dir/train_state if present (trainer.resume_mode=auto)."""
+        if self.config.trainer.get('resume_mode', 'auto') != 'auto':
+            return None
+        path = os.path.join(self.config.trainer.default_local_dir, 'train_state')
+        if not os.path.exists(os.path.join(path, 'trainer.pt')):
+            return None
+        state = torch.load(os.path.join(path, 'trainer.pt'))
+        actor_sums = self.actor_rollout_wg.load_train_state(os.path.join(path, 'actor'))
+        critic_sums = self.critic_wg.load_train_state(os.path.join(path, 'critic')) if self.use_critic else []
+        # an adaptive coefficient continues from its saved value; a fixed one keeps the
+        # configured value (so a run can resume with a different fixed coefficient)
+        if state['kl_value'] is not None and isinstance(self.kl_ctrl, core_algos.AdaptiveKLController):
+            self.kl_ctrl.value = state['kl_value']
+        print(f"[resume] from {path}: step {state['global_steps']}, epoch {state['epoch']}, "
+              f"batch {state['step_in_epoch']} of the epoch; actor checksums {actor_sums}, critic {critic_sums}")
+        return state
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix='global_seqlen'):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -741,17 +850,24 @@ class RayPPOTrainer(object):
 
         logger = self.logger
         self.global_steps = 0
+        resume = self._load_train_state()
+        check_dir = os.environ.get('DEEPCONTROL_RESUME_CHECK_DIR')
+        if resume is not None and check_dir:
+            # resume test: write the restored actor as an HF checkpoint and stop
+            self.actor_rollout_wg.save_checkpoint(check_dir, None)
+            print(f'[resume] restored actor written to {check_dir}')
+            return
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
+        if resume is None and self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
             val_metrics = self._validate()
             pprint(f'Initial validation metrics: {val_metrics}')
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get('val_only', False):
                 return
 
-        # we start from step 1
-        self.global_steps += 1
+        # we start from step 1 (or the step after the saved one)
+        self.global_steps = resume['global_steps'] + 1 if resume is not None else 1
 
         # Agent config preparation
         # gen_config = GenerationConfig(
@@ -766,46 +882,31 @@ class RayPPOTrainer(object):
         #     topk = self.config.retriever.topk,
         # )
 
-        gen_config = GenerationConfig(
-            max_turns=self.config.max_turns,
-            max_start_length=self.config.data.max_start_length,
-            max_prompt_length=self.config.data.max_prompt_length,
-            max_response_length=self.config.data.max_response_length,
-            max_obs_length=self.config.data.max_obs_length,
-            num_gpus=self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes,
-            no_think_rl=self.config.algorithm.no_think_rl,
-            retriever_url = self.config.retriever.url,
-            topk = self.config.retriever.topk,
-            enable_utility_controller=self.config.get("enable_utility_controller", False),
-            utility_gamma=self.config.get("utility_gamma", 0.5),
-            utility_low_threshold=self.config.get("utility_low_threshold", 0.10),
-            utility_low_patience=self.config.get("utility_low_patience", 2),
-            utility_min_turns_before_stop=self.config.get("utility_min_turns_before_stop", 2),
-            utility_force_stop_after_turn=self.config.get("utility_force_stop_after_turn", None),
-            utility_continue_threshold=self.config.get("utility_continue_threshold", 0.25),
-            utility_continue_patience=self.config.get("utility_continue_patience", 2),
-            utility_continue_score_max=self.config.get("utility_continue_score_max", -2.0),
-            utility_continue_prob=self.config.get("utility_continue_prob", 0.10),
-            utility_intervention_schedule=self.config.get("utility_intervention_schedule", None),
-            utility_random_seed=self.config.get("utility_random_seed", None),
-            utility_novelty_encoder=self.config.get("utility_novelty_encoder", "intfloat/e5-base-v2"),
-            utility_novelty_knn_k=self.config.get("utility_novelty_knn_k", 5),
-            utility_novelty_emb_dim=self.config.get("utility_novelty_emb_dim", 768),
-            utility_novelty_max_length=self.config.get("utility_novelty_max_length", 256),
-            utility_cot_tokens=self.config.get("utility_cot_tokens", 512),
-            utility_eff_tau_low=self.config.get("utility_eff_tau_low", 0.05),
-            utility_eff_tau_high=self.config.get("utility_eff_tau_high", 0.20),
-        )
+        gen_config = self._make_gen_config()
 
         generation_manager = LLMGenerationManager(
             tokenizer=self.tokenizer,
             actor_rollout_wg=self.actor_rollout_wg,
             config=gen_config,
         )
+        self._train_generation_manager = generation_manager
+        if resume is not None and resume.get('controller_rng') is not None \
+                and generation_manager.utility_controller is not None:
+            generation_manager.utility_controller.rng.setstate(resume['controller_rng'])
 
         # start training loop
-        for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+        start_epoch = resume['epoch'] if resume is not None else 0
+        for epoch in range(start_epoch, self.config.trainer.total_epochs):
+            # A resumed run replays the saved epoch's data order and skips the batches done.
+            first = resume is not None and epoch == start_epoch
+            self._epoch = epoch
+            self._epoch_rng, batches = epoch_batches(
+                self.train_dataloader,
+                epoch_rng=resume['epoch_rng'] if first else None,
+                torch_rng=resume['torch_rng'] if first else None,
+                skip=resume['step_in_epoch'] if first else 0)
+            for batch_idx, batch_dict in batches:
+                self._step_in_epoch = batch_idx + 1
                 print(f'epoch {epoch}, step {self.global_steps}')
                 metrics = {}
                 timing_raw = {}
@@ -956,10 +1057,15 @@ class RayPPOTrainer(object):
                             val_metrics: dict = self._validate()
                         metrics.update(val_metrics)
 
+                    state_freq = self.config.trainer.get('train_state_freq', 0) or 0
                     if self.config.trainer.save_freq > 0 and \
                             self.global_steps % self.config.trainer.save_freq == 0:
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
+                    elif state_freq > 0 and self.global_steps % state_freq == 0:
+                        # resume point between checkpoints (train_state only, no HF weights)
+                        with _timer('save_train_state', timing_raw):
+                            self._save_train_state(self.config.trainer.default_local_dir)
 
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))

@@ -4,6 +4,8 @@ import random
 from dataclasses import dataclass
 from typing import List, Optional
 
+from ..protocol import CONTROL_CONTINUE, CONTROL_STOP
+
 
 def merge_utility_curve(
     novelty_curve: List[float],
@@ -120,9 +122,18 @@ class OnlineUtilityController:
         novelty: float,
         effectiveness: float,
         score_t: Optional[float] = None,
-        current_tools: Optional[List[str]] = None,
-        intervention_enabled: bool = True,
+        attempting_answer: bool = False,
+        allow_continue: bool = True,
     ) -> OnlineUtilityDecision:
+        """Decide at the close of a search step.
+
+        Termination: utility below `low_utility_threshold` for `low_utility_patience`
+        consecutive steps -> stop. Continuation: the agent is attempting to answer while the
+        last `continue_patience` steps had utility >= `continue_threshold` and the gold-answer
+        score is still <= `continue_score_max` -> continue for one more step. One intervention
+        per episode. No tools are gated: non-compliance is penalized in the reward instead,
+        so the agent sees the same tool feedback it gets at inference.
+        """
         state.turn_idx += 1
         utility = self.compute_utility(novelty, effectiveness)
 
@@ -136,6 +147,21 @@ class OnlineUtilityController:
             else:
                 state.high_utility_streak = 0
 
+        if state.intervention_sent:
+            return OnlineUtilityDecision(utility, "monitor_only", "one_shot_intervention_already_sent", None, [])
+
+        if attempting_answer:
+            if not allow_continue:
+                # continuation is decided elsewhere (answer-based); keep the streaks only
+                return OnlineUtilityDecision(utility, "no_intervention", "utility_monitored", None, [])
+            if (state.high_utility_streak >= self.config.continue_patience
+                    and score_t is not None
+                    and score_t <= self.config.continue_score_max
+                    and self.rng.random() < self.config.continue_prob):
+                state.intervention_sent = True
+                return OnlineUtilityDecision(utility, "continue_once", "high_utility_low_confidence", CONTROL_CONTINUE, [])
+            return OnlineUtilityDecision(utility, "no_intervention", "utility_monitored", None, [])
+
         force_stop = (
             self.config.force_stop_after_turn is not None
             and state.turn_idx >= self.config.force_stop_after_turn
@@ -144,64 +170,8 @@ class OnlineUtilityController:
             state.turn_idx >= self.config.min_turns_before_stop
             and state.low_utility_streak >= self.config.low_utility_patience
         )
-        stop = force_stop or patience_stop
-
-        if current_tools is None:
-            current_tools = ["search", "expand"]
-
-        if state.intervention_sent:
-            return OnlineUtilityDecision(
-                utility=utility,
-                decision="monitor_only",
-                reason="one_shot_intervention_already_sent",
-                control_text=None,
-                tools_allowed=list(current_tools),
-            )
-
-        if not intervention_enabled:
-            return OnlineUtilityDecision(
-                utility=utility,
-                decision="no_intervention",
-                reason="intervention_gate_off",
-                control_text=None,
-                tools_allowed=list(current_tools),
-            )
-
-        if stop:
-            tools_allowed = [t for t in current_tools if t != "search"]
-            if not tools_allowed:
-                tools_allowed = []
+        if force_stop or patience_stop:
+            state.intervention_sent = True
             reason = "utility_below_threshold" if patience_stop else "reach_max_search_turn"
-            control_text = "<control>Stop searching</control>"
-            state.intervention_sent = True
-            return OnlineUtilityDecision(
-                utility=utility,
-                decision="stop",
-                reason=reason,
-                control_text=control_text,
-                tools_allowed=tools_allowed,
-            )
-
-        should_continue_intervene = (
-            state.high_utility_streak >= self.config.continue_patience
-            and score_t is not None
-            and score_t < self.config.continue_score_max
-            and self.rng.random() < self.config.continue_prob
-        )
-        if should_continue_intervene:
-            state.intervention_sent = True
-            return OnlineUtilityDecision(
-                utility=utility,
-                decision="continue_once",
-                reason="sampled_continue_intervention",
-                control_text="<control>Continue the search for one additional step</control>",
-                tools_allowed=list(current_tools),
-            )
-
-        return OnlineUtilityDecision(
-            utility=utility,
-            decision="no_intervention",
-            reason="utility_monitored",
-            control_text=None,
-            tools_allowed=list(current_tools),
-        )
+            return OnlineUtilityDecision(utility, "stop", reason, CONTROL_STOP, [])
+        return OnlineUtilityDecision(utility, "no_intervention", "utility_monitored", None, [])

@@ -180,6 +180,10 @@ class vLLMRollout(BaseRollout):
                 'temperature': 0,
                 'n': 1  # if greedy, only 1 response
             }
+        # a shorter per-call generation budget (e.g. the utility CoT); outputs are still padded
+        # to config.response_length below
+        if 'response_length' in prompts.meta_info:
+            kwargs['max_tokens'] = min(int(prompts.meta_info['response_length']), self.config.response_length)
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):

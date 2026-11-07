@@ -158,6 +158,8 @@ algorithm:
   kl_ctrl:
     type: fixed
     kl_coef: 0.001
+    target_kl: 0.1   # adaptive only
+    horizon: 10000   # adaptive only
   state_masking:
     start_state_marker: "<information>"
     end_state_marker: "</information>"
@@ -175,18 +177,26 @@ trainer:
   critic_warmup: 0
   default_hdfs_dir: ~/experiments/gsm8k/ppo/${trainer.experiment_name}
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  # auto: continue from default_local_dir/train_state when it exists; disable: always start fresh
+  resume_mode: auto
+  # also write train_state (resume point, no HF weights) every this many steps; 0 = only at save_freq
+  train_state_freq: 0
 
-max_turns: 10
+max_turns: 8   # same action budget as inference (infer_fast.py)
 do_search: true
 
 enable_utility_controller: false
+# off: no control | normal: the utility controller with the expand confidence gate and
+# answer-based continuation | fast: every control signal by string match of the gold answer
+control_mode: fast
 
 utility_novelty_encoder: intfloat/e5-base-v2
 utility_novelty_knn_k: 5
 utility_novelty_emb_dim: 768
 utility_novelty_max_length: 512
+utility_novelty_threads: 16  # CPU threads for the novelty encoder in the driver task
 
-utility_cot_tokens: 128
+utility_cot_tokens: 128  # deterministic CoT for effectiveness; 0 = score without a CoT
 utility_eff_tau_low: 0.3
 utility_eff_tau_high: 3.0
 
@@ -203,3 +213,12 @@ utility_continue_prob: 1.0
 
 utility_intervention_schedule: [0.9, 0.9, 0.5, 0.2, 0.0]
 utility_random_seed: 42
+
+# granularity control: expansion guidance after each search in a controlled
+# rollout (how it is decided depends on control_mode)
+granularity_control: true
+max_expand_docs: 3      # documents per expand action; 0 = no cap
+sampled_tokens: true    # train on each turn's sampled token ids, cut after the first action (false: decode, cut to [think]+action, re-encode)
+stray_text_penalty: 0.1 # training reward: per turn with text outside [think]+action (validation reports it without)
+retrieval_workers: 64   # concurrent retriever requests per rollout step
+rollout_weight_cache: true  # keep rollout weights in vLLM for a whole multi-turn rollout

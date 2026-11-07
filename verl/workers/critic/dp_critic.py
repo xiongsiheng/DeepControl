@@ -25,6 +25,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
 from verl.trainer.ppo import core_algos
+from verl.utils.fsdp_utils import load_fsdp_optimizer, offload_fsdp_optimizer
 from verl.workers.critic import BasePPOCritic
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_functional import masked_mean
@@ -54,6 +55,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         super().__init__(config=config)
         self.critic_module = critic_module
         self.critic_optimizer = critic_optimizer
+        # set by the worker when the optimizer state is offloaded (see DataParallelPPOActor)
+        self.optimizer_offload = False
         self.use_remove_padding = self.config.model.get('use_remove_padding', False)
         if self.use_remove_padding and not FLASH_ATTN_AVAILABLE:
             self.use_remove_padding = False
@@ -122,7 +125,11 @@ class DataParallelPPOCritic(BasePPOCritic):
             grad_norm = self.critic_module.clip_grad_norm_(self.config.grad_clip)
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.critic_module.parameters(), max_norm=self.config.grad_clip)
+        if self.optimizer_offload:
+            load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=torch.cuda.current_device())
         self.critic_optimizer.step()
+        if self.optimizer_offload:
+            offload_fsdp_optimizer(optimizer=self.critic_optimizer)
         return grad_norm
 
     def compute_values(self, data: DataProto) -> torch.Tensor:

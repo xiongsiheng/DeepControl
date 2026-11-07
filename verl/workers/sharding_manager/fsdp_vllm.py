@@ -66,18 +66,34 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         else:
             self.gen_random_states = None
 
-    def __enter__(self):
-        log_gpu_memory_usage('Before state_dict() in sharding manager memory', logger=logger)
-        params = self.module.state_dict()
-        log_gpu_memory_usage('After state_dict() in sharding manager memory', logger=logger)
-        # Copy, not share memory
-        load_format = 'hf' if self.full_params else 'dtensor'
-        self.inference_engine.sync_model_weights(params, load_format=load_format)
-        log_gpu_memory_usage('After sync model weights in sharding manager', logger=logger)
+        # keep_weights: leave the synced weights in vLLM after a generate call, so the next
+        # call (same multi-turn rollout, unchanged actor) skips the sync; release_weights()
+        # drops them.
+        self.keep_weights = False
+        self.weights_synced = False
+        # bumped by every actor update; a cached copy synced at an older version is re-synced
+        self.actor_version = 0
+        self.synced_version = -1
 
-        del params
-        torch.cuda.empty_cache()
-        log_gpu_memory_usage('After del state_dict and empty_cache in sharding manager', logger=logger)
+    @property
+    def needs_sync(self) -> bool:
+        return not self.weights_synced or self.synced_version != self.actor_version
+
+    def __enter__(self):
+        if self.needs_sync:
+            log_gpu_memory_usage('Before state_dict() in sharding manager memory', logger=logger)
+            params = self.module.state_dict()
+            log_gpu_memory_usage('After state_dict() in sharding manager memory', logger=logger)
+            # Copy, not share memory
+            load_format = 'hf' if self.full_params else 'dtensor'
+            self.inference_engine.sync_model_weights(params, load_format=load_format)
+            self.weights_synced = True
+            self.synced_version = self.actor_version
+            log_gpu_memory_usage('After sync model weights in sharding manager', logger=logger)
+
+            del params
+            torch.cuda.empty_cache()
+            log_gpu_memory_usage('After del state_dict and empty_cache in sharding manager', logger=logger)
 
         # TODO: offload FSDP model weights
         # self.module.cpu()
@@ -90,10 +106,18 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             self.torch_random_states = torch.cuda.get_rng_state()
             torch.cuda.set_rng_state(self.gen_random_states)
 
+    def release_weights(self):
+        if self.weights_synced:
+            self.inference_engine.offload_model_weights()
+            self.weights_synced = False
+        torch.cuda.empty_cache()
+
     def __exit__(self, exc_type, exc_value, traceback):
-        log_gpu_memory_usage('Before vllm offload in sharding manager', logger=logger)
-        self.inference_engine.offload_model_weights()
-        log_gpu_memory_usage('After vllm offload in sharding manager', logger=logger)
+        if not self.keep_weights or exc_type is not None:
+            log_gpu_memory_usage('Before vllm offload in sharding manager', logger=logger)
+            self.inference_engine.offload_model_weights()
+            self.weights_synced = False
+            log_gpu_memory_usage('After vllm offload in sharding manager', logger=logger)
 
         # self.module.to('cuda')
         # if torch.distributed.get_rank() == 0:

@@ -26,7 +26,10 @@ def group_retrieval_by_turn(retrieval_log: List[dict]) -> Dict[int, List[str]]:
 class PassageEncoder:
     """Sentence encoder used by novelty scoring."""
 
-    def __init__(self, model_name: str, device: str):
+    def __init__(self, model_name: str, device: str, num_threads: int = 0):
+        # On CPU inside a Ray task, torch inherits OMP_NUM_THREADS=1; num_threads > 0 overrides.
+        if device == "cpu" and num_threads > 0:
+            torch.set_num_threads(num_threads)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
         self.model = AutoModel.from_pretrained(model_name).to(device).eval()
         self.device = device
@@ -42,7 +45,10 @@ class PassageEncoder:
             return_tensors="pt",
         ).to(self.device)
         out = self.model(**inputs)
-        embs = out.last_hidden_state.mean(dim=1)
+        # e5 average pooling over real tokens (padding excluded, so an embedding does not
+        # depend on the other texts in the batch)
+        mask = inputs["attention_mask"].unsqueeze(-1).to(out.last_hidden_state.dtype)
+        embs = (out.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
         embs = F.normalize(embs, dim=-1)
         return embs.detach().cpu().numpy().astype(np.float32)
 

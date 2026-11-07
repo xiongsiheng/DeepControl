@@ -1,5 +1,7 @@
 import argparse
+import queue
 import threading
+import time
 import re
 import os
 from typing import List, Optional
@@ -14,9 +16,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
 
-
-
-
+from gpu_flat import build_gpu_flat
 
 
 manifest = [
@@ -24,7 +24,7 @@ manifest = [
         "name": "wiki18",
         "corpus_path": "data/wiki18/wiki_dump.jsonl",
         "index_path": "data/wiki18/e5_Flat.index",
-    }
+    },
 ]
 
 
@@ -170,37 +170,9 @@ def _parse_gpu_ids(gpu_ids_str: str):
 
 def _build_gpu_flat_streaming(cpu_index, gpu_ids, use_fp16, add_batch):
     base, ids = _unwrap_idmap_and_get_ids(cpu_index)
-    if not isinstance(base, faiss.IndexFlat):
-        raise ValueError("Only Flat index supported for streaming build")
-
-    ntotal, d = base.ntotal, base.d
-    if ids is None:
-        ids = np.arange(ntotal, dtype=np.int64)
-
-    metric = base.metric_type
-
-    def make_gpu_index(gid):
-        res = faiss.StandardGpuResources()
-        cfg = faiss.GpuIndexFlatConfig()
-        cfg.device = gid
-        cfg.useFloat16 = bool(use_fp16)
-        if metric == faiss.METRIC_INNER_PRODUCT:
-            gpu = faiss.GpuIndexFlatIP(res, d, cfg)
-        else:
-            gpu = faiss.GpuIndexFlatL2(res, d, cfg)
-        return faiss.IndexIDMap2(gpu)
-
-    # Single GPU
-    index = make_gpu_index(gpu_ids[0])
-
-    for s in range(0, ntotal, add_batch):
-        e = min(ntotal, s + add_batch)
-        xb = base.reconstruct_n(s, e - s)
-        xb = np.ascontiguousarray(xb, dtype=np.float32)
-        idb = np.ascontiguousarray(ids[s:e], dtype=np.int64)
-        index.add_with_ids(xb, idb)
-
-    return index
+    if ids is not None:
+        raise ValueError("GPU Flat build does not support an ID map")
+    return build_gpu_flat(base, gpu_ids, use_fp16=use_fp16, add_batch=add_batch)
 
 
 #####################################
@@ -238,7 +210,9 @@ class DenseRetriever:
         self.faiss_lock = threading.Lock()
         self.corpus = load_corpus(corpus_path, config.corpus_num_proc)
 
-        device = torch.device("cuda") if config.faiss_gpu else torch.device("cpu")
+        device = torch.device(
+            "cuda" if config.faiss_gpu and torch.cuda.is_available() else "cpu"
+        )
         self.encoder = Encoder(
             config.retriever_name,
             config.retriever_model,
@@ -295,6 +269,98 @@ class MultiCorpusRetriever:
 
 
 #####################################
+# Cross-request batching
+#####################################
+
+class RetrievalBatchItem:
+    def __init__(self, queries, topk):
+        self.queries = queries
+        self.topk = topk
+        self.done = threading.Event()
+        self.result = None
+        self.error = None
+
+
+class RetrievalBatcher:
+    def __init__(self, backend, max_queries, wait_ms):
+        self.backend = backend
+        self.max_queries = max(1, max_queries)
+        self.wait_s = max(0.0, wait_ms / 1000.0)
+        self.items = queue.Queue()
+        self.stopping = False
+        self.worker = threading.Thread(
+            target=self._run,
+            name="retrieval-batcher",
+            daemon=True,
+        )
+        self.worker.start()
+
+    def submit(self, queries, topk):
+        item = RetrievalBatchItem(queries, topk)
+        self.items.put(item)
+        item.done.wait()
+        if item.error is not None:
+            raise item.error
+        return item.result
+
+    def stop(self):
+        self.stopping = True
+        self.items.put(None)
+        self.worker.join(timeout=30)
+
+    def _run(self):
+        while True:
+            first = self.items.get()
+            if first is None:
+                return
+
+            batch = [first]
+            query_count = len(first.queries)
+            deadline = time.monotonic() + self.wait_s
+
+            while query_count < self.max_queries:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                try:
+                    item = self.items.get(timeout=timeout)
+                except queue.Empty:
+                    break
+                if item is None:
+                    self.stopping = True
+                    break
+                batch.append(item)
+                query_count += len(item.queries)
+
+            try:
+                flat_queries = [
+                    query
+                    for item in batch
+                    for query in item.queries
+                ]
+                max_topk = max(item.topk for item in batch)
+                merged = self.backend.batch_search(flat_queries, max_topk)
+
+                offset = 0
+                for item in batch:
+                    size = len(item.queries)
+                    item.result = [
+                        row[: item.topk]
+                        for row in merged[offset : offset + size]
+                    ]
+                    offset += size
+            except Exception as exc:
+                for item in batch:
+                    item.error = exc
+            finally:
+                for item in batch:
+                    item.done.set()
+
+            if self.stopping:
+                return
+
+
+#####################################
 # Global ID Mapper
 #####################################
 
@@ -333,11 +399,24 @@ app = FastAPI()
 retriever = None
 retrievers = None
 id_mapper = None
+retrieval_batcher = None
+
+
+@app.on_event("startup")
+async def raise_request_thread_limit():
+    # /retrieve is a sync handler, so Starlette runs it in anyio's thread pool (40 threads by
+    # default): at most 40 requests reach the batcher at once. RETRIEVER_REQUEST_THREADS
+    # raises the limit so a whole rollout turn of queries can share one index scan.
+    n = int(os.environ.get("RETRIEVER_REQUEST_THREADS", "0") or 0)
+    if n > 0:
+        import anyio.to_thread
+        anyio.to_thread.current_default_thread_limiter().total_tokens = n
+        print(f"[server] request thread limit = {n}")
 
 
 @app.on_event("startup")
 def startup():
-    global retriever, retrievers, id_mapper
+    global retriever, retrievers, id_mapper, retrieval_batcher
 
     cfg = app.state.config
     retrievers = []
@@ -357,12 +436,23 @@ def startup():
         retrievers.append(r)
 
     retriever = MultiCorpusRetriever(retrievers)
+    retrieval_batcher = RetrievalBatcher(
+        retriever,
+        max_queries=cfg.request_batch_size,
+        wait_ms=cfg.request_batch_wait_ms,
+    )
+
+
+@app.on_event("shutdown")
+def shutdown():
+    if retrieval_batcher is not None:
+        retrieval_batcher.stop()
 
 
 @app.post("/retrieve")
 def retrieve(req: QueryRequest):
     topk = req.topk or app.state.config.topk
-    merged = retriever.batch_search(req.queries, topk)
+    merged = retrieval_batcher.submit(req.queries, topk)
 
     results = []
     for items in merged:
@@ -412,6 +502,8 @@ def main():
 
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--request_batch_size", type=int, default=64)
+    parser.add_argument("--request_batch_wait_ms", type=float, default=5.0)
     parser.add_argument("--max_length", type=int, default=256)
     parser.add_argument("--pooling_method", default="mean")
     parser.add_argument("--use_fp16", action="store_true")
@@ -426,8 +518,8 @@ def main():
     parser.add_argument("--nprobe", type=int, default=None)
 
     parser.add_argument("--port", type=int, default=8000)
-    # Loopback by default: the inference client normally runs on the same machine. Pass
-    # --host 0.0.0.0 only on a private network where another host must reach it.
+    # Loopback by default: the evaluator reaches the retriever on the same node. A run
+    # that serves another host must pass --host explicitly.
     parser.add_argument("--host", type=str, default="127.0.0.1")
 
     args = parser.parse_args()
